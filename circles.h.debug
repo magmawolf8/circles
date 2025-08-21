@@ -1,0 +1,249 @@
+#if defined(ENABLE_RGB_MATRIX_COMMUNITY_MODULE_CIRCLES)
+RGB_MATRIX_EFFECT(CIRCLES)
+#   ifdef RGB_MATRIX_CUSTOM_EFFECT_IMPLS
+//
+//
+//
+//
+//********************************
+//                        Includes
+//********************************
+#   include "constants.h"
+#   include "invsq.h"
+#   include "expit.h"
+#   include "logistic.h"
+//
+//
+//
+//
+//********************************
+//          Anticipation variables
+//********************************
+static uint8_t anticipation;
+static uint32_t inst_activity;
+static uint32_t activity;
+//
+//
+//
+//
+//********************************
+//            Simulation variables
+//********************************
+static q17_15_t r_px, r_py, g_px, g_py, b_px, b_py;
+static q13_19_t r_vx, r_vy, g_vx, g_vy, b_vx, b_vy;
+//
+//
+//
+//
+//********************************
+//            Simulation functions
+//********************************
+static void reflect(q17_15_t *px, q17_15_t *py,
+                    q13_19_t *vx, q13_19_t *vy) {
+    if (*px < MIN_PX) { *px = 2 * MIN_PX - *px; *vx = -*vx; }
+    if (*px > MAX_PX) { *px = 2 * MAX_PX - *px; *vx = -*vx; }
+    if (*py < MIN_PY) { *py = 2 * MIN_PY - *py; *vy = -*vy; }
+    if (*py > MAX_PY) { *py = 2 * MAX_PY - *py; *vy = -*vy; }
+}
+static void gravity(q17_15_t d_px, q17_15_t d_py,
+                    q13_19_t *m_vx, q13_19_t *m_vy,
+                    q13_19_t *n_vx, q13_19_t *n_vy) {
+    uint32_t ud_px = (uint32_t)(d_px < 0 ? -d_px : d_px);
+    uint32_t ud_py = (uint32_t)(d_py < 0 ? -d_py : d_py);
+    ud_px >>= 15;
+    ud_py >>= 15;
+
+    uint32_t d2_p = ud_px * ud_px + ud_py * ud_py;
+    if (d2_p < MIN_D2_P) d2_p = MIN_D2_P;
+
+    q16_16_t d_p = sqrt32_q16(d2_p);
+
+    q12_20_t k_div_d2 = divu32_q(GRAVITY_K, d2_p, 20);
+    
+    ud_px <<= 16;
+    q1_31_t x_div_d = (q1_31_t) divu32_q(ud_px, d_p, 31);
+    if (d_px < 0) x_div_d = -x_div_d;
+    ud_py <<= 16;
+    q1_31_t y_div_d = (q1_31_t) divu32_q(ud_py, d_p, 31);
+    if (d_py < 0) y_div_d = -y_div_d;
+    
+    int64_t res_x = (int64_t)k_div_d2 * (int64_t)x_div_d;
+    int64_t res_y = (int64_t)k_div_d2 * (int64_t)y_div_d;
+    
+    q13_19_t ax = (q13_19_t)(res_x >> 32);
+    q13_19_t ay = (q13_19_t)(res_y >> 32);
+
+    *m_vx += ax;
+    *m_vy += ay;
+    *n_vx -= ax;
+    *n_vy -= ay;
+}
+//
+//
+//
+//
+//********************************
+//                Drawing function
+//********************************
+static uint16_t distq15_u16(q17_15_t d_px, q17_15_t d_py) {
+    uint32_t ud_px = (uint32_t)(d_px < 0 ? -d_px : d_px);
+    uint32_t ud_py = (uint32_t)(d_py < 0 ? -d_py : d_py);
+    ud_px >>= 15;
+    ud_py >>= 15;
+    uint32_t d2_p = ud_px * ud_px + ud_py * ud_py;
+
+    uint32_t res = 0;
+
+    uint32_t bit = 1 << 30;
+    while (bit > d2_p)
+        bit >>= 2;
+
+    while (bit) {
+        if (d2_p >= res + bit) {
+            d2_p -= res + bit;
+            res = (res >> 1) + bit;
+        } else {
+            res >>= 1;
+        }
+        bit >>= 2;
+    }
+    return res;
+}
+//
+//
+//
+//
+//********************************
+//              Key press callback
+//********************************
+bool process_record_circles(uint16_t keycode, keyrecord_t *record) {
+    inst_activity = MAX_INST_EMA;
+
+    if (anticipation == 0 || anticipation == 4) return true;
+
+    xy_t led_xy_p = LED_POINT_MAP[
+        g_led_config.matrix_co
+            [record->event.key.row]
+            [record->event.key.col]
+    ];
+    uint16_t a = random16();
+    q13_19_t vx = cos16(a) * D_0_V;
+    q13_19_t vy = -sin16(a) * D_0_V;
+    
+    switch (anticipation) {
+        case 1:
+            b_px = led_xy_p.x;
+            b_py = led_xy_p.y;
+            b_vx = vx;
+            b_vy = vy;
+            break;
+        case 2:
+            g_px = led_xy_p.x;
+            g_py = led_xy_p.y;
+            g_vx = vx;
+            g_vy = vy;
+            break;
+        case 3:
+            r_px = led_xy_p.x;
+            r_py = led_xy_p.y;
+            r_vx = vx;
+            r_vy = vy;
+            break;
+    }
+    anticipation--;
+    return true;
+}
+//
+//
+//
+//
+//********************************
+//                CIRCLES function
+//********************************
+#include "core_cm4.h"
+bool CIRCLES(effect_params_t *params) {
+    
+    RGB_MATRIX_USE_LIMITS(led_min, led_max);
+    if (params->init) {
+        rgb_matrix_set_color_all(0, 0, 0);
+
+        anticipation = 4;
+        inst_activity = 0;
+        activity = 0;
+
+        CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+        DWT->CYCCNT = 0;
+        DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    }
+    // update activity
+    activity = ((activity << EMA_FACTOR) - activity + inst_activity) >> EMA_FACTOR;
+    inst_activity = 0;
+    // check if anticipation should be decreased
+    if (anticipation == 4 && activity >= THRESHOLD_EMA) anticipation--;
+    // then add entropy to random generator
+    random16_add_entropy((activity >> 16) + (activity & 0xFFFF));
+
+    uint32_t start = DWT->CYCCNT;
+    switch (anticipation) {
+        case 0:
+            b_px += b_vx >> 4; b_py += b_vy >> 4;
+            reflect(&b_px, &b_py, &b_vx, &b_vy);
+        case 1:
+            g_px += g_vx >> 4; g_py += g_vy >> 4;
+            reflect(&g_px, &g_py, &g_vx, &g_vy);
+        case 2:
+            r_px += r_vx >> 4; r_py += r_vy >> 4;
+            reflect(&r_px, &r_py, &r_vx, &r_vy);
+    }
+    uint32_t end = DWT->CYCCNT;
+    uprintf("reflect cycles: %ld\n", end - start);
+
+    start = DWT->CYCCNT;
+    switch (anticipation) {
+        case 0:
+            gravity(b_px - g_px, b_py - g_py, &g_vx, &g_vy, &b_vx, &b_vy);
+            gravity(r_px - b_px, r_py - b_py, &b_vx, &b_vy, &r_vx, &r_vy);
+        case 1:
+            gravity(g_px - r_px, g_py - r_py, &r_vx, &r_vy, &g_vx, &g_vy);
+    }
+    end = DWT->CYCCNT;
+    uprintf("gravity cycles: %ld\n", end - start);
+
+    // get radius
+    start = DWT->CYCCNT;
+    uint16_t d_set_p = expitu32_u16(activity);
+    end = DWT->CYCCNT;
+    uprintf("radius get cycles: %ld\n", end - start);
+
+    start = DWT->CYCCNT;
+    uint8_t r, g, b;
+    for (uint8_t row = 0; row < MATRIX_ROWS; row++) {
+        for (uint8_t col = 0; col < MATRIX_COLS; col++) {
+            uint8_t led = g_led_config.matrix_co[row][col];
+            if (led == NO_LED) continue;
+
+            const xy_t led_xy_p = LED_POINT_MAP[led];
+            r = g = b = 0;
+            if (row == 0 && col == 0) start = DWT->CYCCNT;
+            switch (anticipation) {
+                case 0:
+                    b = logistic32_u8(d_set_p - distq15_u16(led_xy_p.x - b_px, led_xy_p.y - b_py));
+                case 1:
+                    g = logistic32_u8(d_set_p - distq15_u16(led_xy_p.x - g_px, led_xy_p.y - g_py));
+                case 2:
+                    r = logistic32_u8(d_set_p - distq15_u16(led_xy_p.x - r_px, led_xy_p.y - r_py));
+            }
+            if (row == 0 && col == 0) {
+                end = DWT->CYCCNT;
+                uprintf("draw calc cycles: %ld\n", end - start);
+            }
+            rgb_matrix_set_color(led, r, g, b);
+        }
+    }
+    end = DWT->CYCCNT;
+    uprintf("drawing cycles: %ld\n", end - start);
+
+    return rgb_matrix_check_finished_leds(led_max);
+}
+#   endif
+#endif
